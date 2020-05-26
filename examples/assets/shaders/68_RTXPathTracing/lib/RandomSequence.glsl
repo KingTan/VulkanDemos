@@ -1,14 +1,11 @@
-// random
+#ifndef RANDOM_SEQUENCE_COMMON
+#define RANDOM_SEQUENCE_COMMON
+
 struct RandomSequence
 {
-	uint PositionSeed;
-	uint TimeSeed;
-
-	// LCG
-	uint PseudoRandomSeed;
-
-	// Halton options
-	uint HaltonDimensionIndex;
+	uint positionSeed;
+	uint timeSeed;
+	uint haltonDimensionIndex;
 };
 
 uint IntegerHash(uint a)
@@ -22,43 +19,40 @@ uint IntegerHash(uint a)
 	return a;
 }
 
-// TEA-based pseudo-random number generator
-uint RandInit(uint Seed0, uint Seed1)
+uint RandInit(uint seed0, uint seed1)
 {
-	// Constants cited from "GPU Random Numbers via the Tiny Encryption Algorithm"
-	const uint Delta = 0x9e3779b9;
-	const uvec4 Key = uvec4(0xa341316c, 0xc8013ea4, 0xad90777d, 0x7e95761e);
-	uint Rounds = 8;
+	const uint delta = 0x9e3779b9;
+	const uvec4 key = uvec4(0xa341316c, 0xc8013ea4, 0xad90777d, 0x7e95761e);
+	const uint rounds = 8;
+	
+	uint sum = 0;
+	uvec2 value = uvec2(seed0, seed1);
 
-	uint Sum = 0;
-	uvec2 Value = uvec2(Seed0, Seed1);
-	for (uint Index = 0; Index < Rounds; ++Index)
+	for (uint index = 0; index < rounds; ++index)
 	{
-		Sum += Delta;
-		Value.x += (Value.y + Sum) ^ ((Value.y << 4) + Key.x) ^ ((Value.y >> 5) + Key.y);
-		Value.y += (Value.x + Sum) ^ ((Value.x << 4) + Key.z) ^ ((Value.x >> 5) + Key.w);
+		sum += delta;
+		value.x += (value.y + sum) ^ ((value.y << 4) + key.x) ^ ((value.y >> 5) + key.y);
+		value.y += (value.x + sum) ^ ((value.x << 4) + key.z) ^ ((value.x >> 5) + key.w);
 	}
 
-	return Value.x;
+	return value.x;
 }
 
-// Linear congruential generator to evolve pseudo-random numbers
-float Rand(inout uint Seed)
+float Rand(inout uint seed)
 {
-	// Scale and Bias coefficients are taken from the Park-Miller RNG
-	const uint Scale = 48271;
-	const uint Bias = 0;
-	Seed = Seed * Scale + Bias;
+	const uint scale = 48271;
+	const uint bias = 0;
+	seed = seed * scale + bias;
 
-	// Map to significand and divide into [0, 1) range
-	float Result = float(Seed & 0x00FFFFFF);
-	Result /= float(0x01000000);
-	return Result;
+	float result = float(seed & 0x00FFFFFF);
+	result /= float(0x01000000);
+
+	return result;
 }
 
-uint Prime128(uint Dimension)
+uint Prime128(uint index)
 {
-	const uint Primes[] = {
+	const uint primes[] = {
 		2,3,5,7,11,13,17,19,23,29,
 		31,37,41,43,47,53,59,61,67,71,
 		73,79,83,89,97,101,103,107,109,113,
@@ -73,12 +67,13 @@ uint Prime128(uint Dimension)
 		607,613,617,619,631,641,643,647,653,659,
 		661,673,677,683,691,701,709,719
 	};
-	return Primes[Dimension % 128];
+
+	return primes[index % 128];
 }
 
-uint Prime512(uint Dimension)
+uint Prime512(uint index)
 {
-	const uint Primes[] = {
+	const uint primes[] = {
 		2,3,5,7,11,13,17,19,23,29,
 		31,37,41,43,47,53,59,61,67,71,
 		73,79,83,89,97,101,103,107,109,113,
@@ -132,80 +127,77 @@ uint Prime512(uint Dimension)
 		3581,3583,3593,3607,3613,3617,3623,3631,3637,3643,
 		3659,3671
 	};
-	return Primes[Dimension % 512];
+
+	return primes[index % 512];
 }
 
-float Halton(uint Index, uint Base)
+float Halton(uint index, uint base)
 {
 	float r = 0.0;
 	float f = 1.0;
 
-	float BaseInv = 1.0 / Base;
-	while (Index > 0)
+	float baseInv = 1.0 / base;
+	while (index > 0)
 	{
-		f *= BaseInv;
-		r += f * (Index % Base);
-		Index /= Base;
+		f *= baseInv;
+		r += f * (index % base);
+		index /= base;
 	}
 
 	return r;
 }
 
-void RandomSequence_Initialize(inout RandomSequence RandSequence, uint PositionSeed, uint TimeSeed)
+void RandomSequenceInitialize(inout RandomSequence randSequence, uint positionSeed, uint timeSeed)
 {
-	RandSequence.PositionSeed = PositionSeed;
-	RandSequence.TimeSeed = TimeSeed;
-
-	// LCG
-	RandSequence.PseudoRandomSeed = RandInit(PositionSeed, TimeSeed);
-
-	// Halton
-	RandSequence.HaltonDimensionIndex = 0;
+	randSequence.positionSeed = positionSeed;
+	randSequence.timeSeed = timeSeed;
+	randSequence.haltonDimensionIndex = 0;
 }
 
-float RandomSequence_generateSample(inout RandomSequence RandSequence, in uint SampleIndex)
+float RandomSequenceGenerateSample(inout RandomSequence randSequence, in uint sampleIndex)
 {
-	uint HaltonSampleIndex = IntegerHash(RandSequence.PositionSeed) + RandSequence.TimeSeed;
-
-	float RandomSample = Halton(HaltonSampleIndex, Prime512(RandSequence.HaltonDimensionIndex));
-	RandSequence.HaltonDimensionIndex += 1;
-	return RandomSample;
+	uint haltonSampleIndex = IntegerHash(randSequence.positionSeed) + randSequence.timeSeed;
+	float randomSample = Halton(haltonSampleIndex, Prime512(randSequence.haltonDimensionIndex));
+	randSequence.haltonDimensionIndex += 1;
+	return randomSample;
 }
 
-float RandomSequence_GenerateSample1D(inout RandomSequence RandSequence, inout uint SampleIndex)
+float RandomSequenceGenerateSample1D(inout RandomSequence randSequence, inout uint sampleIndex)
 {
-	float Sample;
-	Sample = RandomSequence_generateSample(RandSequence, SampleIndex);
-	SampleIndex += 1;
-	return Sample;
+	float randomSample;
+	randomSample = RandomSequenceGenerateSample(randSequence, sampleIndex);
+	sampleIndex += 1;
+	return randomSample;
 }
 
-vec2 RandomSequence_GenerateSample2D(inout RandomSequence RandSequence, inout uint SampleIndex)
+vec2 RandomSequenceGenerateSample2D(inout RandomSequence randSequence, inout uint sampleIndex)
 {
-	vec2 Sample;
-	Sample.x = RandomSequence_generateSample(RandSequence, SampleIndex);
-	Sample.y = RandomSequence_generateSample(RandSequence, SampleIndex + 1);
-	SampleIndex += 2;
-	return Sample;
+	vec2 randomSample;
+	randomSample.x = RandomSequenceGenerateSample(randSequence, sampleIndex);
+	randomSample.y = RandomSequenceGenerateSample(randSequence, sampleIndex + 1);
+	sampleIndex += 2;
+	return randomSample;
 }
 
-vec3 RandomSequence_GenerateSample3D(inout RandomSequence RandSequence, inout uint SampleIndex)
+vec3 RandomSequenceGenerateSample3D(inout RandomSequence randSequence, inout uint sampleIndex)
 {
-	vec3 Sample;
-	Sample.x = RandomSequence_generateSample(RandSequence, SampleIndex);
-	Sample.y = RandomSequence_generateSample(RandSequence, SampleIndex + 1);
-	Sample.z = RandomSequence_generateSample(RandSequence, SampleIndex + 2);
-	SampleIndex += 3;
-	return Sample;
+	vec3 randomSample;
+	randomSample.x = RandomSequenceGenerateSample(randSequence, sampleIndex);
+	randomSample.y = RandomSequenceGenerateSample(randSequence, sampleIndex + 1);
+	randomSample.z = RandomSequenceGenerateSample(randSequence, sampleIndex + 2);
+	sampleIndex += 3;
+	return randomSample;
 }
 
-vec4 RandomSequence_GenerateSample4D(inout RandomSequence RandSequence, inout uint SampleIndex)
+vec4 RandomSequenceGenerateSample4D(inout RandomSequence randSequence, inout uint sampleIndex)
 {
-	vec4 Sample;
-	Sample.x = RandomSequence_generateSample(RandSequence, SampleIndex);
-	Sample.y = RandomSequence_generateSample(RandSequence, SampleIndex + 1);
-	Sample.z = RandomSequence_generateSample(RandSequence, SampleIndex + 2);
-	Sample.w = RandomSequence_generateSample(RandSequence, SampleIndex + 3);
-	SampleIndex += 4;
-	return Sample;
+	vec4 randomSample;
+	randomSample.x = RandomSequenceGenerateSample(randSequence, sampleIndex);
+	randomSample.y = RandomSequenceGenerateSample(randSequence, sampleIndex + 1);
+	randomSample.z = RandomSequenceGenerateSample(randSequence, sampleIndex + 2);
+	randomSample.w = RandomSequenceGenerateSample(randSequence, sampleIndex + 3);
+	sampleIndex += 4;
+	return randomSample;
 }
+
+#endif

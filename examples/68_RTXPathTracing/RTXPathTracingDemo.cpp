@@ -6,9 +6,13 @@
 #include "Math/Vector4.h"
 #include "Math/Matrix4x4.h"
 
+#include "GenericPlatform/GenericPlatformTime.h"
+
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 #include "tiny_gltf.h"
+
+#include "LightData.h"
 
 #include <vector>
 
@@ -33,14 +37,13 @@ struct VkGeometryInstance
 	uint64_t accelerationStructureHandle;
 };
 
-struct CameraParamBlock
+struct GlobalParamBlock
 {
-	Vector4 lens;
 	Vector4 pos;
-	Vector4 samplesAndSeed;
-	Vector4 param;
 	Matrix4x4 invProj;
 	Matrix4x4 invView;
+	Vector4 samplingData;
+	Vector4 viewSize;
 };
 
 struct AccelerationStructureInstance
@@ -125,6 +128,33 @@ struct Scene
 	std::vector<Material> materials;
 	std::vector<Mesh*> meshes;
 	std::vector<Node*> entities;
+	std::vector<Light*> lights;
+	std::vector<LightData> lightDatas;
+	
+	void UpdateLightData()
+	{
+		lightDatas.resize(lights.size());
+
+		for (int32 i = 0; i < lights.size(); ++i) 
+		{
+			Light* light = lights[i];
+			if (light->type == LIGHT_TYPE_DIRECTIONAL) {
+				lightDatas[i].SetLight((DirectionalLight*)light);
+			}
+			else if (light->type == LIGHT_TYPE_POINT) {
+				lightDatas[i].SetLight((PointLight*)light);
+			}
+			else if (light->type == LIGHT_TYPE_RECT) {
+				lightDatas[i].SetLight((RectLight*)light);
+			}
+			else if (light->type == LIGHT_TYPE_SKY) {
+				lightDatas[i].SetLight((SkyEnvLight*)light);
+			}
+			else if (light->type == LIGHT_TYPE_SPOT) {
+				lightDatas[i].SetLight((SpotLight*)light);
+			}
+		}
+	}
 
 	void Destroy()
 	{
@@ -142,6 +172,11 @@ struct Scene
 			delete meshes[i];
 		}
 		meshes.clear();
+
+		for (int32 i = 0; i < lights.size(); ++i) {
+			delete lights[i];
+		}
+		lights.clear();
 	}
 };
 
@@ -222,16 +257,6 @@ private:
 			m_ViewCamera.Update(time, delta);
 		}
 
-		if (InputManager::IsMouseDown(MouseType::MOUSE_BUTTON_LEFT) || InputManager::GetMouseDelta() > 0 || InputManager::IsKeyDown(KeyboardType::KEY_SPACE))
-		{
-			m_FrameCount.x = 0;
-			m_CameraParam.param.x = 1;
-		}
-		else
-		{
-			m_CameraParam.param.x = 0;
-		}
-		
 		UpdateUniformBuffer();
 		SetupGfxCommand(bufferIndex);
 
@@ -247,12 +272,12 @@ private:
 			ImGui::SetNextWindowSize(ImVec2(0, 0), ImGuiSetCond_FirstUseEver);
 			ImGui::Begin("RTXRaytracing", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
-			int samples = m_CameraParam.samplesAndSeed.x;
-			int bounces = m_CameraParam.samplesAndSeed.y;
-			ImGui::SliderInt("NumberOfSamples", &samples, 1, 128);
-			ImGui::SliderInt("NumberOfBounces", &bounces, 1, 128);
-			m_CameraParam.samplesAndSeed.x = samples;
-			m_CameraParam.samplesAndSeed.y = bounces;
+			// MaxBounces
+			{
+				int maxBounces = m_GlobalParam.samplingData.z;
+				ImGui::SliderInt("MaxBounces", &maxBounces, 1, 128);
+				m_GlobalParam.samplingData.z = maxBounces;
+			}
 
 			ImGui::Text("%.3f ms/frame (%.1f FPS)", 1000.0f / m_LastFPS, m_LastFPS);
 			ImGui::End();
@@ -268,25 +293,17 @@ private:
 
 	void UpdateUniformBuffer()
 	{
-		float yMaxFar = m_ViewCamera.GetFar() * MMath::Tan(m_ViewCamera.GetFov() / 2);
-		float xMaxFar = yMaxFar * (float)GetWidth() / (float)GetHeight();
+		m_GlobalParam.samplingData.x = uint32(GenericPlatformTime::Seconds() * 1000 * 1000);
+		m_GlobalParam.samplingData.y = MMath::Atan((2.0f * MMath::Tan(m_ViewCamera.GetFov() * 0.5f)) / m_FrameHeight);
 
-		m_CameraParam.lens.x = xMaxFar;
-		m_CameraParam.lens.y = yMaxFar;
-		m_CameraParam.lens.z = m_ViewCamera.GetNear();
-		m_CameraParam.lens.w = m_ViewCamera.GetFar();
+		m_GlobalParam.pos = m_ViewCamera.GetTransform().GetOrigin();
 
-		m_CameraParam.pos = m_ViewCamera.GetTransform().GetOrigin();
+		m_GlobalParam.invProj = m_ViewCamera.GetProjection();
+		m_GlobalParam.invProj.SetInverse();
+		m_GlobalParam.invView = m_ViewCamera.GetView();
+		m_GlobalParam.invView.SetInverse();
 
-		m_CameraParam.samplesAndSeed.z = MMath::RandRange(0.0f, 1.0f);
-		m_CameraParam.samplesAndSeed.w = MMath::RandRange(0.0f, 1.0f);
-		
-		m_CameraParam.invProj = m_ViewCamera.GetProjection();
-		m_CameraParam.invProj.SetInverse();
-		m_CameraParam.invView = m_ViewCamera.GetView();
-		m_CameraParam.invView.SetInverse();
-
-		memcpy(m_UniformBuffer->mapped, &m_CameraParam, sizeof(CameraParamBlock));
+		memcpy(m_UniformBuffer->mapped, &m_GlobalParam, sizeof(GlobalParamBlock));
 	}
 
 	void PrepareDescriptorSets()
@@ -296,14 +313,14 @@ private:
 		m_DescriptorSets.resize(m_DescriptorSetLayouts.size());
 
 		// sets
-		std::vector<VkDescriptorPoolSize> poolSizes(6);
+		std::vector<VkDescriptorPoolSize> poolSizes(7);
 		// set=0,accelerationStructureNV
 		poolSizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV;
 		poolSizes[0].descriptorCount = 1;
 		// set=0,image
 		poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		poolSizes[1].descriptorCount = 1;
-		// set=0,CameraProperties
+		// set=0,global params
 		poolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		poolSizes[2].descriptorCount = 1;
 		// set=1,Vertices + Indices
@@ -315,7 +332,10 @@ private:
 		// set=1,textures
 		poolSizes[5].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		poolSizes[5].descriptorCount = 1 * m_Scene.meshes.size();;
-
+		// set=0,lights
+		poolSizes[6].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		poolSizes[6].descriptorCount = 1;
+		
 		VkDescriptorPoolCreateInfo descriptorPoolCreateInfo;
 		ZeroVulkanStruct(descriptorPoolCreateInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
 		descriptorPoolCreateInfo.poolSizeCount = poolSizes.size();
@@ -358,7 +378,7 @@ private:
 		imageWriteDescriptorSet.dstBinding = 1;
 		imageWriteDescriptorSet.descriptorCount = 1;
 
-		// CameraProperties
+		// global params
 		VkWriteDescriptorSet uboWriteDescriptorSet;
 		ZeroVulkanStruct(uboWriteDescriptorSet, VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
 		uboWriteDescriptorSet.pBufferInfo = &m_UniformBuffer->descriptor;
@@ -367,9 +387,19 @@ private:
 		uboWriteDescriptorSet.dstBinding = 2;
 		uboWriteDescriptorSet.descriptorCount = 1;
 
+		// lights
+		VkWriteDescriptorSet lightWriteDescriptorSet;
+		ZeroVulkanStruct(lightWriteDescriptorSet, VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+		lightWriteDescriptorSet.pBufferInfo = &m_LightsBuffer->descriptor;
+		lightWriteDescriptorSet.dstSet = m_DescriptorSets[0];
+		lightWriteDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		lightWriteDescriptorSet.dstBinding = 3;
+		lightWriteDescriptorSet.descriptorCount = 1;
+
 		writeDescriptorSets.push_back(asWriteDescriptorSet);
 		writeDescriptorSets.push_back(imageWriteDescriptorSet);
 		writeDescriptorSets.push_back(uboWriteDescriptorSet);
+		writeDescriptorSets.push_back(lightWriteDescriptorSet);
 
 		// set 1
 		// vertices
@@ -490,17 +520,24 @@ private:
 			imageLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 			imageLayoutBinding.descriptorCount = 1;
 			imageLayoutBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
-			// CameraProperties
+			// global params
 			VkDescriptorSetLayoutBinding uniformBufferBinding = {};
 			uniformBufferBinding.binding = 2;
 			uniformBufferBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 			uniformBufferBinding.descriptorCount = 1;
 			uniformBufferBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
+			// lights
+			VkDescriptorSetLayoutBinding lightBufferBinding = {};
+			lightBufferBinding.binding = 3;
+			lightBufferBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			lightBufferBinding.descriptorCount = 1;
+			lightBufferBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
 
 			std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
 			layoutBindings.push_back(asLayoutBinding);
 			layoutBindings.push_back(imageLayoutBinding);
 			layoutBindings.push_back(uniformBufferBinding);
+			layoutBindings.push_back(lightBufferBinding);
 
 			VkDescriptorSetLayoutCreateInfo layoutCreateInfo;
 			ZeroVulkanStruct(layoutCreateInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
@@ -622,23 +659,42 @@ private:
 
 	void PrepareUniformBuffers()
 	{
-		m_CameraParam.samplesAndSeed.x = 1;
-		m_CameraParam.samplesAndSeed.y = 8;
-		m_CameraParam.samplesAndSeed.z = MMath::RandRange(0.0f, 1.0f);
-		m_CameraParam.samplesAndSeed.w = MMath::RandRange(0.0f, 1.0f);
+		m_GlobalParam.viewSize.x = m_FrameWidth;
+		m_GlobalParam.viewSize.y = m_FrameHeight;
+		m_GlobalParam.viewSize.z = 1.0f / m_FrameWidth;
+		m_GlobalParam.viewSize.w = 1.0f / m_FrameHeight;
+
+		m_GlobalParam.samplingData.x = 0;
+		m_GlobalParam.samplingData.y = MMath::Atan((2.0f * MMath::Tan(m_ViewCamera.GetFov() * 0.5f)) / m_FrameHeight);
+		m_GlobalParam.samplingData.z = 16;
+		m_GlobalParam.samplingData.w = 0;
 
 		m_UniformBuffer = vk_demo::DVKBuffer::CreateBuffer(
 			m_VulkanDevice, 
 			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			sizeof(CameraParamBlock),
-			&m_CameraParam
+			sizeof(GlobalParamBlock),
+			&m_GlobalParam
 		);
 		m_UniformBuffer->Map();
 
 		m_ViewCamera.SetPosition(Vector3(-0.4f, 0.11f, 0.0f));
 		m_ViewCamera.LookAt(Vector3(0.2f, 0.095f, 0.0f));
 		m_ViewCamera.Perspective(PI / 4, (float)GetWidth(), (float)GetHeight(), 0.1f, 1000.0f);
+	}
+
+	void LoadLights(vk_demo::DVKCommandBuffer* cmdBuffer, tinygltf::Model &gltfModel)
+	{
+		for (int32 i = 0; i < gltfModel.lights.size(); ++i)
+		{
+			tinygltf::Light& light = gltfModel.lights[i];
+		}
+
+		if (gltfModel.lights.size() == 0)
+		{
+			DirectionalLight* defaultLight = new DirectionalLight(Vector3(0, -1, 1).GetSafeNormal(), Vector3(1, 1, 1));
+			m_Scene.lights.push_back(defaultLight);
+		}
 	}
 
 	void LoadTextures(vk_demo::DVKCommandBuffer* cmdBuffer, tinygltf::Model &gltfModel)
@@ -980,6 +1036,7 @@ private:
 		LoadMaterials(cmdBuffer, gltfModel);
 		LoadMeshes(cmdBuffer, gltfModel);
 		LoadNodes(cmdBuffer, gltfModel);
+		LoadLights(cmdBuffer, gltfModel);
 	}
 
 	void LoadAssets()
@@ -987,6 +1044,17 @@ private:
 		vk_demo::DVKCommandBuffer* cmdBuffer = vk_demo::DVKCommandBuffer::Create(m_VulkanDevice, m_CommandPool);
 
 		LoadGLTFModel(cmdBuffer);
+
+		// prepare light buffer
+		m_Scene.lights.push_back(new SkyEnvLight(Vector3(0.5f, 0.5f, 1.0f)));
+		m_Scene.UpdateLightData();
+		m_LightsBuffer = vk_demo::DVKBuffer::CreateBuffer(
+			m_VulkanDevice, 
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			sizeof(LightData) * m_Scene.lightDatas.size(),
+			m_Scene.lightDatas.data()
+		);
 
 		// prepare material buffer
 		m_MaterialsBuffer = vk_demo::DVKBuffer::CreateBuffer(
@@ -1344,6 +1412,7 @@ private:
 		delete m_Shader;
 		delete m_Material;
 
+		delete m_LightsBuffer;
 		delete m_MaterialsBuffer;
 		delete m_ObjectsBuffer;
 		delete m_ObjectsBoundsBuffer;
@@ -1428,11 +1497,8 @@ private:
 		vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 		vkCmdSetScissor(commandBuffer,  0, 1, &scissor);
 
-		m_FrameCount.x += 1;
-
 		m_Material->BeginFrame();
 		m_Material->BeginObject();
-		m_Material->SetLocalUniform("uboParam", &m_FrameCount, sizeof(Vector4));
 		m_Material->EndObject();
 		m_Material->EndFrame();
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Material->GetPipeline());
@@ -1479,11 +1545,10 @@ private:
 
 	vk_demo::DVKBuffer*									m_ShaderBindingTable = nullptr;
 	vk_demo::DVKBuffer*									m_UniformBuffer = nullptr;
-	CameraParamBlock									m_CameraParam;
+	GlobalParamBlock									m_GlobalParam;
 	vk_demo::DVKCamera									m_ViewCamera;
 
 	vk_demo::DVKTexture*								m_StorageImage = nullptr;
-	Vector4												m_FrameCount;
 
 	VkPipeline											m_Pipeline = VK_NULL_HANDLE;
 	VkPipelineLayout									m_PipelineLayout = VK_NULL_HANDLE;
@@ -1496,6 +1561,7 @@ private:
 	vk_demo::DVKShader*									m_Shader = nullptr;
 
 	Scene												m_Scene;
+	vk_demo::DVKBuffer*									m_LightsBuffer = nullptr;
 	vk_demo::DVKBuffer*									m_MaterialsBuffer = nullptr;
 	vk_demo::DVKBuffer*									m_ObjectsBuffer = nullptr;
 	vk_demo::DVKBuffer*									m_ObjectsBoundsBuffer = nullptr;

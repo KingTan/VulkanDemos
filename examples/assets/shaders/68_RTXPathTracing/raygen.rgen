@@ -2,97 +2,86 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_NV_ray_tracing : require
 
-#include "common.glsl"
-#include "RandomSequence.glsl"
-
-layout(binding = 0, set = 0) uniform accelerationStructureNV topLevelAS;
-layout(binding = 1, set = 0, rgba32f) uniform image2D image;
-
-layout(binding = 2, set = 0) uniform CameraProperties 
-{
-	vec4 lens;
-	vec4 pos;
-	vec4 samplesAndSeed;
-	vec4 param;
-	mat4 invProj;
-	mat4 invView;
-} cameraParam;
-
-layout(location = 0) rayPayloadNV RayPayloadInfo rayInfo;
-
-
-
-
-
-
+#include "lib/Common.glsl"
+#include "lib/RandomSequence.glsl"
+#include "lib/LightCommon.glsl"
+#include "lib/CameraCommon.glsl"
+#include "lib/LightSky.glsl"
 
 void main() 
 {
-	uint NumberOfSamples = uint(cameraParam.samplesAndSeed.x);
-	uint NumberOfBounces = uint(cameraParam.samplesAndSeed.y);
 	
-	rayInfo.seedAndRandom.xy = gl_LaunchIDNV.xy;
-	rayInfo.seedAndRandom.zw = cameraParam.samplesAndSeed.zw;
+	uvec2 bufferSize = uvec2(uint(globalParam.viewSize.x), uint(globalParam.viewSize.y));
+	uint linearIndex = gl_LaunchIDNV.x + (gl_LaunchIDNV.y * bufferSize.x); 
+	RandomSequence randSequence;
+	RandomSequenceInitialize(randSequence, linearIndex, uint(globalParam.samplingData.x));
 
-	vec3 pixelColor = vec3(0, 0, 0);
+	uint rayCounter  = 0;
+	uint sampleIndex = 0;
+	uint sampleCount = 1;
+	vec3 pixelColor  = vec3(0, 0, 0);
 
-	for (uint s = 0; s < NumberOfSamples; ++s)
+	for (uint i = 0; i < sampleCount; ++i)
 	{
-		const vec2 pixel = vec2(gl_LaunchIDNV.x + Rand(rayInfo), gl_LaunchIDNV.y + Rand(rayInfo));
-		const vec2 uv = (pixel / gl_LaunchSizeNV.xy);
+		vec3 irradiance = vec3(0.0, 0.0, 0.0);
 
-		vec3 origin = cameraParam.pos.xyz;
-		vec3 direction = vec3(uv.x * 2.0 - 1.0, -(uv.y * 2.0 - 1.0), 1.0); // flip Y
+		CameraInfo camera;
+		camera.pos = globalParam.pos;
+		camera.invProj = globalParam.invProj;
+		camera.invView = globalParam.invView;
+		camera.viewSize = globalParam.viewSize;
 
-		// clip to view space
-		direction = (cameraParam.invProj * vec4(direction, 1.0)).xyz;
-		direction.x = direction.x * direction.z;
-		direction.y = direction.y * direction.z;
-
-		// view space to world space
-		direction.xyz = (cameraParam.invView * vec4(direction, 0.0)).xyz;
-		direction.xyz = normalize(direction.xyz);
-
-		// ray color
-		vec3 rayColor = vec3(1, 1, 1);
+		RayDesc ray;
+		uvec2 pixel;
+		float emitterPdf;
+		SampleEmitter(camera, gl_LaunchIDNV.xy, randSequence, sampleIndex, 0, 0, ray, pixel, emitterPdf);
+		if (emitterPdf <= 0.0) {
+			continue;
+		}
 		
-		for (uint b = 0; b < NumberOfBounces; ++b)
+		vec3 rayThroughput = vec3(1.0, 1.0, 1.0);
+		float rayPdf = 1.0;
+
+		// TODO:texture lod
+		RayCone rayCone;
+		rayCone.spreadAngle = globalParam.samplingData.y;
+
+		traceNV(topLevelAS, gl_RayFlagsOpaqueNV, 0xFF, 0, 0, 0, ray.origin, ray.tMin, ray.direction, ray.tMax, 0);
+		rayCounter += 1;
+
+		float materialPdf = 0.0;
+		uint bounces = 0;
+		uint maxBounces = uint(globalParam.samplingData.z);
+		while (bounces < maxBounces)
 		{
-			const float tMin = 0.0001;
-			const float tMax = 999999;
+			// environment contribution
+			if (payLoadInfo.hitT < 0)
+			{
+				int skyLightId = 0;
+				vec3 environmentRadiance = vec3(0.0, 0.0, 0.0);
+				SkyEnvLightEvalLight(skyLightId, ray.direction, ray, environmentRadiance);
 
-			traceNV(topLevelAS, gl_RayFlagsOpaqueNV, 0xFF, 0, 0, 0, origin, tMin, direction, tMax, 0);
+				if (length(environmentRadiance) > 0.0)
+				{
 
-			const vec3 hitColor = rayInfo.colorAndDistance.rgb;
-			const float t = rayInfo.colorAndDistance.w;
-			const bool isScattered = rayInfo.scatterDirection.w > 0;
+				}
 
-			rayColor *= hitColor;
+				// irradiance += environmentRadiance;
+				irradiance = environmentRadiance;
 
-			if (t < 0 || !isScattered) {
 				break;
 			}
 
-			origin = origin + t * direction;
-			direction = rayInfo.scatterDirection.xyz;
+			bounces += 1;
 		}
 
-		pixelColor += rayColor;	
+		pixelColor = irradiance;
 	}
 
-	pixelColor = pixelColor / NumberOfSamples;
-	pixelColor = pow(pixelColor, vec3(1.0 / 2.2));
-	
-	
-	uvec2 BufferSize = uvec2(1400, 900);
-	uint LinearIndex = gl_LaunchIDNV.x + (gl_LaunchIDNV.y * BufferSize.x); 
-	RandomSequence RandSequence;
-	RandomSequence_Initialize(RandSequence, LinearIndex, 2);
+	// pixelColor = pixelColor / sampleCount;
+	// pixelColor = pow(pixelColor, vec3(1.0 / 2.2));
 
-	uint SampleIndex = 0;
-	vec4 RandSample = RandomSequence_GenerateSample4D(RandSequence, SampleIndex);
-
-	pixelColor = RandSample.rrr;
+	// pixelColor.xyz = RandomSequenceGenerateSample3D(randSequence, sampleIndex);
 
 	imageStore(image, ivec2(gl_LaunchIDNV.xy), vec4(pixelColor, 0.0));
 }

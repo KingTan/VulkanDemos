@@ -1100,6 +1100,7 @@ SETUP_SAMPLE_START(68_RTXPathTracing)
 		${CMAKE_CURRENT_SOURCE_DIR}/68_RTXPathTracing/RTXPathTracingDemo.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/68_RTXPathTracing/tiny_gltf.h
 		${CMAKE_CURRENT_SOURCE_DIR}/68_RTXPathTracing/json.hpp
+		${CMAKE_CURRENT_SOURCE_DIR}/68_RTXPathTracing/LightData.h
 	)
 	file(GLOB files "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/68_RTXPathTracing/*.*")
 	foreach(file ${files})
